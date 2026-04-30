@@ -16,7 +16,7 @@ A flexible, storage-agnostic Role-Based Access Control (RBAC) library for Go. De
 ## Installation
 
 ```bash
-go get github.com/Seann-Moser/rbac
+go get github.com/DarlingGoose/rbac
 ```
 
 ## Quick Start
@@ -29,7 +29,7 @@ import (
   "fmt"
   "log/slog"
 
-  "github.com/Seann-Moser/rbac"
+  "github.com/DarlingGoose/rbac"
   "go.mongodb.org/mongo-driver/mongo"
   "go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -106,14 +106,14 @@ func main() {
     ```bash
     goos: linux
     goarch: amd64
-    pkg: github.com/Seann-Moser/rbac
+    pkg: github.com/DarlingGoose/rbac
     cpu: AMD Ryzen 7 3700X 8-Core Processor             
     BenchmarkCan_NoRoles-16                          2158071               596.0 ns/op
     BenchmarkCan_SingleRoleSinglePerm-16              953500              1084 ns/op
     BenchmarkCan_ManyRolesManyPerms-16                169365              7284 ns/op
     BenchmarkCan_ResourceWildcard-16                  894992              1210 ns/op
     PASS
-    ok      github.com/Seann-Moser/rbac     5.322s
+    ok      github.com/DarlingGoose/rbac     5.322s
     ```
 ## Contributing
 

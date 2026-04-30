@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/Seann-Moser/rbac"
+	"github.com/DarlingGoose/rbac"
 )
 
 // CreateUserHandler handles creating a new user.
