@@ -76,7 +76,7 @@ func newMySQLStore(t *testing.T) storeAdapter {
 	ctx := context.Background()
 
 	ctr, err := mysql.Run(ctx, "mysql:8",
-		mysql.WithDatabase("rbac_test"),
+		mysql.WithDatabase("rbacv2"),
 		mysql.WithUsername("rbac"),
 		mysql.WithPassword("rbac"),
 		testcontainers.WithWaitStrategy(
@@ -98,7 +98,7 @@ func newMySQLStore(t *testing.T) storeAdapter {
 		t.Fatalf("mysql port: %v", err)
 	}
 
-	dsn := fmt.Sprintf("rbac:rbac@tcp(%s:%s)/rbac_test?parseTime=true", host, port.Port())
+	dsn := fmt.Sprintf("rbac:rbac@tcp(%s:%s)/rbacv2?parseTime=true", host, port.Port())
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		t.Fatalf("sql.Open mysql: %v", err)
@@ -124,6 +124,9 @@ func runSuite(t *testing.T, s storeAdapter) {
 	t.Run("UserRole", func(t *testing.T) { testUserRoles(t, s) })
 	t.Run("UserGroup", func(t *testing.T) { testUserGroups(t, s) })
 	t.Run("GroupRole", func(t *testing.T) { testGroupRoles(t, s) })
+	if assignments, ok := s.(RoleAssignmentRepo); ok {
+		t.Run("RoleAssignment", func(t *testing.T) { testRoleAssignments(t, s, assignments) })
+	}
 }
 
 // -----------------------------------------------------------------------
@@ -658,6 +661,66 @@ func testGroupRoles(t *testing.T, s storeAdapter) {
 			t.Errorf("expected empty list, got %v", ids)
 		}
 	})
+}
+
+func testRoleAssignments(t *testing.T, s storeAdapter, assignments RoleAssignmentRepo) {
+	ctx := context.Background()
+	user := &User{Username: "assignment-user", Email: "assignment-user@example.com"}
+	if err := s.CreateUser(ctx, user); err != nil {
+		t.Fatalf("setup CreateUser: %v", err)
+	}
+	role := &Role{Name: "assignment-role"}
+	if err := s.CreateRole(ctx, role); err != nil {
+		t.Fatalf("setup CreateRole: %v", err)
+	}
+	scope := Scope{Type: "guide", ID: "guide-1"}
+	assignment := &RoleAssignment{UserID: user.ID, RoleID: role.ID, Scope: scope}
+	if err := assignments.CreateRoleAssignment(ctx, assignment); err != nil {
+		t.Fatalf("CreateRoleAssignment: %v", err)
+	}
+	if assignment.ID == "" || assignment.CreatedAt.IsZero() {
+		t.Fatalf("expected generated assignment fields, got %+v", assignment)
+	}
+
+	duplicate := &RoleAssignment{UserID: user.ID, RoleID: role.ID, Scope: scope}
+	if err := assignments.CreateRoleAssignment(ctx, duplicate); err != nil {
+		t.Fatalf("duplicate CreateRoleAssignment: %v", err)
+	}
+	if duplicate.ID != assignment.ID {
+		t.Fatalf("duplicate assignment ID = %s, want %s", duplicate.ID, assignment.ID)
+	}
+
+	listed, err := assignments.ListRoleAssignments(ctx, user.ID, []Scope{scope})
+	if err != nil || len(listed) != 1 || listed[0].RoleID != role.ID {
+		t.Fatalf("ListRoleAssignments = (%+v, %v), want one role %s", listed, err, role.ID)
+	}
+	other, err := assignments.ListRoleAssignments(ctx, user.ID, []Scope{{Type: "guide", ID: "guide-2"}})
+	if err != nil || len(other) != 0 {
+		t.Fatalf("cross-scope ListRoleAssignments = (%+v, %v), want empty", other, err)
+	}
+
+	if err := assignments.DeleteRoleAssignment(ctx, user.ID, role.ID, scope); err != nil {
+		t.Fatalf("DeleteRoleAssignment: %v", err)
+	}
+	listed, err = assignments.ListRoleAssignments(ctx, user.ID, nil)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("ListRoleAssignments after delete = (%+v, %v), want empty", listed, err)
+	}
+
+	cascadeRole := &Role{Name: "assignment-cascade-role"}
+	if err := s.CreateRole(ctx, cascadeRole); err != nil {
+		t.Fatalf("setup cascade role: %v", err)
+	}
+	if err := assignments.CreateRoleAssignment(ctx, &RoleAssignment{UserID: user.ID, RoleID: cascadeRole.ID, Scope: scope}); err != nil {
+		t.Fatalf("setup cascade assignment: %v", err)
+	}
+	if err := s.DeleteRole(ctx, cascadeRole.ID); err != nil {
+		t.Fatalf("DeleteRole for cascade: %v", err)
+	}
+	listed, err = assignments.ListRoleAssignments(ctx, user.ID, nil)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("role deletion did not cascade assignments: (%+v, %v)", listed, err)
+	}
 }
 
 // -----------------------------------------------------------------------

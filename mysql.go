@@ -48,7 +48,10 @@ func NewMySQLStoreManager(ctx context.Context, db *sql.DB) (*Manager, error) {
 		return nil, err
 	}
 
-	def, _ := s.GetRoleByName(ctx, "default")
+	def, err := s.GetRoleByName(ctx, "default")
+	if err != nil {
+		return nil, fmt.Errorf("get default role: %w", err)
+	}
 	if def == nil {
 		def = &Role{Name: "default", Description: "Default role"}
 		if createErr := s.CreateRole(ctx, def); createErr != nil {
@@ -63,6 +66,7 @@ func NewMySQLStoreManager(ctx context.Context, db *sql.DB) (*Manager, error) {
 		RP:              s,
 		UR:              s,
 		UG:              s,
+		GR:              s,
 		DefaultRoleName: "default",
 	}, nil
 }
@@ -74,7 +78,6 @@ func NewMySQLStoreManager(ctx context.Context, db *sql.DB) (*Manager, error) {
 // EnsureSchema creates all required tables if they don't exist.
 func (s *MySQLStore) EnsureSchema(ctx context.Context) error {
 	stmts := []string{
-		`CREATE SCHEMA IF NOT EXISTS rbacv2;`,
 		`CREATE TABLE IF NOT EXISTS rbacv2.permissions (
 			id          VARCHAR(36)  NOT NULL PRIMARY KEY,
 			resource    VARCHAR(255) NOT NULL,

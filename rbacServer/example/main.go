@@ -2,8 +2,8 @@ package main
 
 import (
 	"fmt"
-	"github.com/Seann-Moser/rbac"
-	"github.com/Seann-Moser/rbac/rbacServer"
+	"github.com/DarlingGoose/rbac"
+	"github.com/DarlingGoose/rbac/rbacServer"
 	"log"
 	"net/http"
 )

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Seann-Moser/rbac"
+	"github.com/DarlingGoose/rbac"
 	"github.com/stretchr/testify/require"
 
 	"github.com/testcontainers/testcontainers-go"

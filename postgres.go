@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,7 @@ var (
 	_ UserRoleRepo       = (*PostgresStore)(nil)
 	_ UserGroupRepo      = (*PostgresStore)(nil)
 	_ GroupRoleRepo      = (*PostgresStore)(nil)
+	_ RoleAssignmentRepo = (*PostgresStore)(nil)
 )
 
 //
@@ -47,7 +49,10 @@ func NewPostgresStoreManager(ctx context.Context, db *pgxpool.Pool) (*Manager, e
 		return nil, err
 	}
 
-	def, _ := s.GetRoleByName(ctx, "default")
+	def, err := s.GetRoleByName(ctx, "default")
+	if err != nil {
+		return nil, fmt.Errorf("get default role: %w", err)
+	}
 	if def == nil {
 		def = &Role{Name: "default", Description: "Default role"}
 		if createErr := s.CreateRole(ctx, def); createErr != nil {
@@ -62,6 +67,8 @@ func NewPostgresStoreManager(ctx context.Context, db *pgxpool.Pool) (*Manager, e
 		RP:              s,
 		UR:              s,
 		UG:              s,
+		GR:              s,
+		Assignments:     s,
 		DefaultRoleName: "default",
 	}, nil
 }
@@ -73,6 +80,8 @@ func NewPostgresStoreManager(ctx context.Context, db *pgxpool.Pool) (*Manager, e
 // EnsureSchema creates all required tables and unique indexes if they don't exist.
 func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	ddl := `
+	CREATE SCHEMA IF NOT EXISTS rbac;
+
 	CREATE TABLE IF NOT EXISTS permissions (
 		id          TEXT PRIMARY KEY,
 		resource    TEXT        NOT NULL,
@@ -102,14 +111,18 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		role_id       TEXT   NOT NULL,
 		permission_id TEXT   NOT NULL,
 		created_at    BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (role_id, permission_id)
+		PRIMARY KEY (role_id, permission_id),
+		CONSTRAINT fk_role_permissions_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+		CONSTRAINT fk_role_permissions_permission FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS user_roles (
 		user_id     TEXT   NOT NULL,
 		role_id     TEXT   NOT NULL,
 		assigned_at BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (user_id, role_id)
+		PRIMARY KEY (user_id, role_id),
+		CONSTRAINT fk_user_roles_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+		CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS user_groups (
@@ -117,19 +130,129 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 		user_id     TEXT   NOT NULL,
 		group_name  TEXT   NOT NULL,
 		created_at  BIGINT NOT NULL DEFAULT 0,
-		CONSTRAINT uq_user_groups UNIQUE (user_id, group_name)
+		CONSTRAINT uq_user_groups UNIQUE (user_id, group_name),
+		CONSTRAINT fk_user_groups_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 	);
 
 	CREATE TABLE IF NOT EXISTS group_roles (
 		group_name  TEXT   NOT NULL,
 		role_id     TEXT   NOT NULL,
 		created_at  BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (group_name, role_id)
+		PRIMARY KEY (group_name, role_id),
+		CONSTRAINT fk_group_roles_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE
 	);
+
+	CREATE TABLE IF NOT EXISTS rbac.role_assignments (
+		id          UUID        PRIMARY KEY,
+		user_id     TEXT        NOT NULL,
+		role_id     TEXT        NOT NULL,
+		scope_type  TEXT        NOT NULL,
+		scope_id    TEXT        NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+		CONSTRAINT uq_role_assignments UNIQUE (user_id, role_id, scope_type, scope_id),
+		CONSTRAINT fk_role_assignments_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+		CONSTRAINT fk_role_assignments_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+		CONSTRAINT ck_role_assignments_scope CHECK (scope_type <> '' AND scope_id <> ''),
+		CONSTRAINT ck_role_assignments_platform CHECK (scope_type <> 'platform' OR scope_id = '__platform__')
+	);
+
+	CREATE INDEX IF NOT EXISTS ix_role_assignments_user_scope
+		ON rbac.role_assignments (user_id, scope_type, scope_id);
+
+	DO $constraints$
+	BEGIN
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_role_permissions_role') THEN
+			ALTER TABLE role_permissions ADD CONSTRAINT fk_role_permissions_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
+		END IF;
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_role_permissions_permission') THEN
+			ALTER TABLE role_permissions ADD CONSTRAINT fk_role_permissions_permission FOREIGN KEY (permission_id) REFERENCES permissions(id) ON DELETE CASCADE;
+		END IF;
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_user_roles_user') THEN
+			ALTER TABLE user_roles ADD CONSTRAINT fk_user_roles_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+		END IF;
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_user_roles_role') THEN
+			ALTER TABLE user_roles ADD CONSTRAINT fk_user_roles_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
+		END IF;
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_user_groups_user') THEN
+			ALTER TABLE user_groups ADD CONSTRAINT fk_user_groups_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
+		END IF;
+		IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_group_roles_role') THEN
+			ALTER TABLE group_roles ADD CONSTRAINT fk_group_roles_role FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
+		END IF;
+	END
+	$constraints$;
 	`
 
 	_, err := s.db.Exec(ctx, ddl)
 	return err
+}
+
+//
+// ---------- RoleAssignmentRepo ----------
+//
+
+func (s *PostgresStore) CreateRoleAssignment(ctx context.Context, assignment *RoleAssignment) error {
+	if assignment == nil {
+		return errors.New("rbac: nil role assignment")
+	}
+	if err := validateAssignment(*assignment); err != nil {
+		return err
+	}
+	if assignment.ID == "" {
+		assignment.ID = uuid.NewString()
+	}
+	if assignment.CreatedAt.IsZero() {
+		assignment.CreatedAt = time.Now().UTC()
+	}
+	return s.db.QueryRow(ctx, `
+		INSERT INTO rbac.role_assignments
+			(id, user_id, role_id, scope_type, scope_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id, role_id, scope_type, scope_id)
+		DO UPDATE SET role_id = EXCLUDED.role_id
+		RETURNING id, created_at`,
+		assignment.ID, assignment.UserID, assignment.RoleID,
+		assignment.Scope.Type, assignment.Scope.ID, assignment.CreatedAt,
+	).Scan(&assignment.ID, &assignment.CreatedAt)
+}
+
+func (s *PostgresStore) DeleteRoleAssignment(ctx context.Context, userID, roleID string, scope Scope) error {
+	_, err := s.db.Exec(ctx, `
+		DELETE FROM rbac.role_assignments
+		WHERE user_id = $1 AND role_id = $2 AND scope_type = $3 AND scope_id = $4`,
+		userID, roleID, scope.Type, scope.ID)
+	return err
+}
+
+func (s *PostgresStore) ListRoleAssignments(ctx context.Context, userID string, scopes []Scope) ([]*RoleAssignment, error) {
+	query := `SELECT id, user_id, role_id, scope_type, scope_id, created_at
+		FROM rbac.role_assignments WHERE user_id = $1`
+	args := []interface{}{userID}
+	if len(scopes) > 0 {
+		clauses := make([]string, 0, len(scopes))
+		for _, scope := range dedupeScopes(scopes) {
+			args = append(args, scope.Type, scope.ID)
+			clauses = append(clauses, fmt.Sprintf("(scope_type = $%d AND scope_id = $%d)", len(args)-1, len(args)))
+		}
+		query += " AND (" + strings.Join(clauses, " OR ") + ")"
+	}
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var assignments []*RoleAssignment
+	for rows.Next() {
+		assignment := &RoleAssignment{}
+		if err := rows.Scan(
+			&assignment.ID, &assignment.UserID, &assignment.RoleID,
+			&assignment.Scope.Type, &assignment.Scope.ID, &assignment.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, assignment)
+	}
+	return assignments, rows.Err()
 }
 
 //

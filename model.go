@@ -4,6 +4,7 @@ package rbac
 import (
 	"context"
 	"net/http"
+	"time"
 )
 
 // Core domain types (as before, but put in its own file)
@@ -15,21 +16,83 @@ const (
 	ActionUpdate Action = "update"
 	ActionDelete Action = "delete"
 	ActionAll    Action = "*" // ← matches every action
+	// ActionUnknown is returned for HTTP methods without an RBAC mapping. It
+	// deliberately matches no permission, so callers fail closed.
+	ActionUnknown Action = ""
 )
 
 func HTTPMethodToAction(method string) Action {
 	switch method {
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		return ActionRead
 	case http.MethodPost:
 		return ActionCreate
-	case http.MethodPut:
+	case http.MethodPut, http.MethodPatch:
 		return ActionUpdate
-	case http.MethodPatch:
+	case http.MethodDelete:
 		return ActionDelete
 	default:
-		return ActionAll
+		return ActionUnknown
 	}
+}
+
+const (
+	ScopeTypePlatform = "platform"
+	// PlatformScopeID is non-empty so database uniqueness works consistently.
+	PlatformScopeID = "__platform__"
+)
+
+// Scope identifies the resource within which a role assignment applies.
+type Scope struct {
+	Type string `bson:"type" json:"type"`
+	ID   string `bson:"id" json:"id"`
+}
+
+// PlatformScope returns the normalized global scope.
+func PlatformScope() Scope {
+	return Scope{Type: ScopeTypePlatform, ID: PlatformScopeID}
+}
+
+// RoleAssignment attaches a reusable role to one user in one concrete scope.
+type RoleAssignment struct {
+	ID        string    `bson:"id" json:"id"`
+	UserID    string    `bson:"user_id" json:"user_id"`
+	RoleID    string    `bson:"role_id" json:"role_id"`
+	Scope     Scope     `bson:"scope" json:"scope"`
+	CreatedAt time.Time `bson:"created_at" json:"created_at"`
+}
+
+// ResourceRef identifies an application resource without coupling RBAC to the
+// application's resource tables.
+type ResourceRef struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+}
+
+// CheckRequest is the scoped equivalent of the legacy Can arguments.
+type CheckRequest struct {
+	UserID       string `json:"user_id"`
+	ResourceType string `json:"resource_type"`
+	ResourceID   string `json:"resource_id"`
+	Action       Action `json:"action"`
+}
+
+// ResourceResolver lets an application expose resource ancestry to RBAC.
+type ResourceResolver interface {
+	Parent(ctx context.Context, resource ResourceRef) (*ResourceRef, error)
+}
+
+// InheritancePolicy explicitly controls which actions may inherit an
+// assignment from an ancestor. Exact-scope checks do not invoke this policy.
+type InheritancePolicy interface {
+	AllowInherited(ctx context.Context, request CheckRequest, ancestor ResourceRef) (bool, error)
+}
+
+// ActionInheritancePolicy allows inheritance for the listed actions.
+type ActionInheritancePolicy map[Action]bool
+
+func (p ActionInheritancePolicy) AllowInherited(_ context.Context, request CheckRequest, _ ResourceRef) (bool, error) {
+	return p[request.Action] || p[ActionAll], nil
 }
 
 type Permission struct {
@@ -108,4 +171,12 @@ type GroupRoleRepo interface {
 	AddRoleToGroup(ctx context.Context, groupID, roleID string) error
 	RemoveRoleFromGroup(ctx context.Context, groupID, roleID string) error
 	ListRolesForGroup(ctx context.Context, groupID string) ([]string, error)
+}
+
+// RoleAssignmentRepo persists resource-scoped user role assignments. An empty
+// scopes slice to ListRoleAssignments means all assignments for the user.
+type RoleAssignmentRepo interface {
+	CreateRoleAssignment(ctx context.Context, assignment *RoleAssignment) error
+	DeleteRoleAssignment(ctx context.Context, userID, roleID string, scope Scope) error
+	ListRoleAssignments(ctx context.Context, userID string, scopes []Scope) ([]*RoleAssignment, error)
 }

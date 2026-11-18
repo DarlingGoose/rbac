@@ -2,8 +2,11 @@ package rbac
 
 import (
 	"context"
+	"fmt"
+	"reflect"
+	"time"
 
-	"go.mongodb.org/mongo-driver/mongo"
+	"github.com/google/uuid"
 )
 
 // MockRepo is an in-memory implementation of all RBAC repository interfaces.
@@ -11,29 +14,57 @@ import (
 // and group‐role relationships in maps. This allows unit testing of Manager logic
 // without a real database.
 type MockRepo struct {
-	perms      map[string]*Permission
-	roles      map[string]*Role
-	users      map[string]*User
-	rolePerms  map[string]map[string]struct{}   // roleID -> set of permIDs
-	userRoles  map[string]map[string]struct{}   // userID -> set of roleIDs
-	userGroups map[string]map[string]*UserGroup // userID -> groupID -> *UserGroup
-	groupUsers map[string]map[string]*UserGroup // groupID -> userID -> *UserGroup
-	groupRoles map[string]map[string]struct{}   // groupID -> set of roleIDs
+	perms       map[string]*Permission
+	roles       map[string]*Role
+	users       map[string]*User
+	rolePerms   map[string]map[string]struct{}   // roleID -> set of permIDs
+	userRoles   map[string]map[string]struct{}   // userID -> set of roleIDs
+	userGroups  map[string]map[string]*UserGroup // userID -> groupID -> *UserGroup
+	groupUsers  map[string]map[string]*UserGroup // groupID -> userID -> *UserGroup
+	groupRoles  map[string]map[string]struct{}   // groupID -> set of roleIDs
+	assignments map[string]*RoleAssignment
 }
 
 func (f *MockRepo) ListAllRoles(ctx context.Context) ([]*Role, error) {
-	//TODO implement me
-	panic("implement me")
+	out := make([]*Role, 0, len(f.roles))
+	for _, role := range f.roles {
+		out = append(out, role)
+	}
+	return out, nil
 }
 
 func (f *MockRepo) GetPermissionByResource(ctx context.Context, resource string, action Action) (*Permission, error) {
-	//TODO implement me
-	panic("implement me")
+	for _, permission := range f.perms {
+		if permission.Resource == resource && permission.Action == action {
+			return permission, nil
+		}
+	}
+	return nil, nil
 }
 
 func (f *MockRepo) GetUserByMeta(ctx context.Context, meta map[string]interface{}) (*User, error) {
-	//TODO implement me
-	panic("implement me")
+	for _, user := range f.users {
+		matched := true
+		for key, value := range meta {
+			switch key {
+			case "id":
+				matched = reflect.DeepEqual(user.ID, value)
+			case "username":
+				matched = reflect.DeepEqual(user.Username, value)
+			case "email":
+				matched = reflect.DeepEqual(user.Email, value)
+			default:
+				return nil, fmt.Errorf("GetUserByMeta: unsupported field %q", key)
+			}
+			if !matched {
+				break
+			}
+		}
+		if matched {
+			return user, nil
+		}
+	}
+	return nil, nil
 }
 
 func (f *MockRepo) GetRoleByName(ctx context.Context, name string) (*Role, error) {
@@ -43,20 +74,21 @@ func (f *MockRepo) GetRoleByName(ctx context.Context, name string) (*Role, error
 			return role, nil
 		}
 	}
-	return nil, mongo.ErrNoDocuments
+	return nil, nil
 }
 
 // NewMockRepo initializes a new MockRepo with empty data structures.
 func NewMockRepo() *MockRepo {
 	return &MockRepo{
-		perms:      make(map[string]*Permission),
-		roles:      make(map[string]*Role),
-		users:      make(map[string]*User),
-		rolePerms:  make(map[string]map[string]struct{}),
-		userRoles:  make(map[string]map[string]struct{}),
-		userGroups: make(map[string]map[string]*UserGroup),
-		groupUsers: make(map[string]map[string]*UserGroup),
-		groupRoles: make(map[string]map[string]struct{}),
+		perms:       make(map[string]*Permission),
+		roles:       make(map[string]*Role),
+		users:       make(map[string]*User),
+		rolePerms:   make(map[string]map[string]struct{}),
+		userRoles:   make(map[string]map[string]struct{}),
+		userGroups:  make(map[string]map[string]*UserGroup),
+		groupUsers:  make(map[string]map[string]*UserGroup),
+		groupRoles:  make(map[string]map[string]struct{}),
+		assignments: make(map[string]*RoleAssignment),
 	}
 }
 
@@ -69,8 +101,57 @@ func NewMockRepoManager(m *MockRepo) *Manager {
 		UR:              m,
 		UG:              m,
 		GR:              m,
+		Assignments:     m,
 		DefaultRoleName: "default",
 	}
+}
+
+func assignmentKey(userID, roleID string, scope Scope) string {
+	return userID + "\x00" + roleID + "\x00" + scope.Type + "\x00" + scope.ID
+}
+
+// RoleAssignmentRepo implementation
+func (f *MockRepo) CreateRoleAssignment(_ context.Context, assignment *RoleAssignment) error {
+	key := assignmentKey(assignment.UserID, assignment.RoleID, assignment.Scope)
+	if existing, ok := f.assignments[key]; ok {
+		*assignment = *existing
+		return nil
+	}
+	if assignment.ID == "" {
+		assignment.ID = uuid.NewString()
+	}
+	if assignment.CreatedAt.IsZero() {
+		assignment.CreatedAt = time.Now().UTC()
+	}
+	copy := *assignment
+	f.assignments[key] = &copy
+	return nil
+}
+
+func (f *MockRepo) DeleteRoleAssignment(_ context.Context, userID, roleID string, scope Scope) error {
+	delete(f.assignments, assignmentKey(userID, roleID, scope))
+	return nil
+}
+
+func (f *MockRepo) ListRoleAssignments(_ context.Context, userID string, scopes []Scope) ([]*RoleAssignment, error) {
+	filter := make(map[Scope]struct{}, len(scopes))
+	for _, scope := range scopes {
+		filter[scope] = struct{}{}
+	}
+	var out []*RoleAssignment
+	for _, assignment := range f.assignments {
+		if assignment.UserID != userID {
+			continue
+		}
+		if len(filter) > 0 {
+			if _, ok := filter[assignment.Scope]; !ok {
+				continue
+			}
+		}
+		copy := *assignment
+		out = append(out, &copy)
+	}
+	return out, nil
 }
 
 // PermissionRepo implementation

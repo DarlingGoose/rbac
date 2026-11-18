@@ -94,7 +94,10 @@ func NewMongoStoreManager(ctx context.Context, db *mongo.Database) (*Manager, er
 	}
 
 	// Ensure default role exists
-	def, _ := m.GetRoleByName(ctx, "default")
+	def, err := m.GetRoleByName(ctx, "default")
+	if err != nil {
+		return nil, fmt.Errorf("get default role: %w", err)
+	}
 	if def == nil {
 		def = &Role{Name: "default", Description: "Default role"}
 		// Use a temporary role to get the ID back since CreateRole sets it
@@ -110,6 +113,7 @@ func NewMongoStoreManager(ctx context.Context, db *mongo.Database) (*Manager, er
 		RP:              m,
 		UR:              m,
 		UG:              m,
+		GR:              m,
 		DefaultRoleName: "default",
 	}, nil
 }
@@ -168,7 +172,7 @@ func (m *MongoStore) GetGroupsByUserID(ctx context.Context, userID string) ([]*U
 func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 	// Permissions: unique(resource, action)
 	_, err := m.permsCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{"resource", 1}, {"action", 1}}, //nolint:govet
+		Keys:    bson.D{{Key: "resource", Value: 1}, {Key: "action", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {
@@ -177,7 +181,7 @@ func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 
 	// Roles: unique(name)
 	_, err = m.rolesCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{"name", 1}}, //nolint:govet
+		Keys:    bson.D{{Key: "name", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {
@@ -186,8 +190,8 @@ func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 
 	// Users: unique(username), unique(email)
 	for _, idx := range []mongo.IndexModel{
-		{Keys: bson.D{{"username", 1}}, Options: options.Index().SetUnique(true)}, //nolint:govet
-		{Keys: bson.D{{"email", 1}}, Options: options.Index().SetUnique(true)},    //nolint:govet
+		{Keys: bson.D{{Key: "username", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "email", Value: 1}}, Options: options.Index().SetUnique(true)},
 	} {
 		if _, err = m.usersCol.Indexes().CreateOne(ctx, idx); err != nil {
 			return err
@@ -196,7 +200,7 @@ func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 
 	// Role permissions: unique(role_id, permission_id)
 	_, err = m.rolePermCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{"role_id", 1}, {"permission_id", 1}}, //nolint:govet
+		Keys:    bson.D{{Key: "role_id", Value: 1}, {Key: "permission_id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {
@@ -205,7 +209,7 @@ func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 
 	// User roles: unique(user_id, role_id)
 	_, err = m.userRoleCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{"user_id", 1}, {"role_id", 1}}, //nolint:govet
+		Keys:    bson.D{{Key: "user_id", Value: 1}, {Key: "role_id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {
@@ -213,7 +217,7 @@ func (m *MongoStore) EnsureIndexes(ctx context.Context) error {
 	}
 
 	_, err = m.groupRoleCol.Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{"group_name", 1}, {"role_id", 1}}, //nolint:govet
+		Keys:    bson.D{{Key: "group_name", Value: 1}, {Key: "role_id", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	})
 	if err != nil {

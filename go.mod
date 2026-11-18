@@ -1,4 +1,4 @@
-module github.com/Seann-Moser/rbac
+module github.com/DarlingGoose/rbac
 
 go 1.24.3
 

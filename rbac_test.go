@@ -211,10 +211,10 @@ func TestCanResourceWildcard(t *testing.T) {
 		t.Errorf("expected Can resource wildcard match=true, got %v, err %v", ok, err)
 	}
 
-	// Should match multi-segment wildcard
+	// A single star is segment-bound and must not match multiple segments.
 	ok, err = mgr.Can(ctx, "user1", "survey.foo.bar.test", ActionCreate)
-	if err != nil || !ok {
-		t.Errorf("expected Can multi-segment wildcard match=true, got %v, err %v", ok, err)
+	if err != nil || ok {
+		t.Errorf("expected Can single-segment wildcard match=false, got %v, err %v", ok, err)
 	}
 
 	// Should not match non-conforming resource

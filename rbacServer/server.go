@@ -3,7 +3,7 @@ package rbacServer
 import (
 	_ "embed"
 	"encoding/json"
-	"github.com/Seann-Moser/rbac"
+	"github.com/DarlingGoose/rbac"
 	"log"
 	"net/http"
 )
