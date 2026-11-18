@@ -22,6 +22,7 @@ var (
 	_ UserRoleRepo       = (*MySQLStore)(nil)
 	_ UserGroupRepo      = (*MySQLStore)(nil)
 	_ GroupRoleRepo      = (*MySQLStore)(nil)
+	_ RoleAssignmentRepo = (*MySQLStore)(nil)
 )
 
 //
@@ -67,6 +68,7 @@ func NewMySQLStoreManager(ctx context.Context, db *sql.DB) (*Manager, error) {
 		UR:              s,
 		UG:              s,
 		GR:              s,
+		Assignments:     s,
 		DefaultRoleName: "default",
 	}, nil
 }
@@ -131,6 +133,21 @@ func (s *MySQLStore) EnsureSchema(ctx context.Context) error {
 			created_at  BIGINT       NOT NULL DEFAULT 0,
 			PRIMARY KEY (group_name, role_id)
 		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+
+		`CREATE TABLE IF NOT EXISTS rbacv2.role_assignments (
+			id          VARCHAR(36)  NOT NULL PRIMARY KEY,
+			user_id     VARCHAR(36)  NOT NULL,
+			role_id     VARCHAR(36)  NOT NULL,
+			scope_type  VARCHAR(255) NOT NULL,
+			scope_id    VARCHAR(255) NOT NULL,
+			created_at  DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+			CONSTRAINT uq_role_assignments UNIQUE (user_id, role_id, scope_type, scope_id),
+			INDEX ix_role_assignments_user_scope (user_id, scope_type, scope_id),
+			CONSTRAINT fk_role_assignments_user FOREIGN KEY (user_id) REFERENCES rbacv2.users(id) ON DELETE CASCADE,
+			CONSTRAINT fk_role_assignments_role FOREIGN KEY (role_id) REFERENCES rbacv2.roles(id) ON DELETE CASCADE,
+			CONSTRAINT ck_role_assignments_scope CHECK (scope_type <> '' AND scope_id <> ''),
+			CONSTRAINT ck_role_assignments_platform CHECK (scope_type <> 'platform' OR scope_id = '__platform__')
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
 	}
 
 	for _, stmt := range stmts {
@@ -139,6 +156,85 @@ func (s *MySQLStore) EnsureSchema(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+//
+// ---------- RoleAssignmentRepo ----------
+//
+
+func (s *MySQLStore) CreateRoleAssignment(ctx context.Context, assignment *RoleAssignment) error {
+	if assignment == nil {
+		return errors.New("rbac: nil role assignment")
+	}
+	if err := validateAssignment(*assignment); err != nil {
+		return err
+	}
+	if assignment.ID == "" {
+		assignment.ID = uuid.NewString()
+	}
+	if assignment.CreatedAt.IsZero() {
+		assignment.CreatedAt = time.Now().UTC()
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO rbacv2.role_assignments
+			(id, user_id, role_id, scope_type, scope_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE id = id`,
+		assignment.ID, assignment.UserID, assignment.RoleID,
+		assignment.Scope.Type, assignment.Scope.ID, assignment.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+
+	return s.db.QueryRowContext(ctx, `
+		SELECT id, created_at FROM rbacv2.role_assignments
+		WHERE user_id = ? AND role_id = ? AND scope_type = ? AND scope_id = ?`,
+		assignment.UserID, assignment.RoleID, assignment.Scope.Type, assignment.Scope.ID,
+	).Scan(&assignment.ID, &assignment.CreatedAt)
+}
+
+func (s *MySQLStore) DeleteRoleAssignment(ctx context.Context, userID, roleID string, scope Scope) error {
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM rbacv2.role_assignments
+		WHERE user_id = ? AND role_id = ? AND scope_type = ? AND scope_id = ?`,
+		userID, roleID, scope.Type, scope.ID)
+	return err
+}
+
+func (s *MySQLStore) ListRoleAssignments(ctx context.Context, userID string, scopes []Scope) ([]*RoleAssignment, error) {
+	query := `SELECT id, user_id, role_id, scope_type, scope_id, created_at
+		FROM rbacv2.role_assignments WHERE user_id = ?`
+	args := []interface{}{userID}
+	if len(scopes) > 0 {
+		uniqueScopes := dedupeScopes(scopes)
+		clauses := make([]string, 0, len(uniqueScopes))
+		for _, scope := range uniqueScopes {
+			args = append(args, scope.Type, scope.ID)
+			clauses = append(clauses, "(scope_type = ? AND scope_id = ?)")
+		}
+		query += " AND (" + strings.Join(clauses, " OR ") + ")"
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var assignments []*RoleAssignment
+	for rows.Next() {
+		assignment := &RoleAssignment{}
+		if err := rows.Scan(
+			&assignment.ID, &assignment.UserID, &assignment.RoleID,
+			&assignment.Scope.Type, &assignment.Scope.ID, &assignment.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		assignments = append(assignments, assignment)
+	}
+	return assignments, rows.Err()
 }
 
 //
