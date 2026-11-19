@@ -30,12 +30,70 @@ var (
 //
 
 type MySQLStore struct {
-	db *sql.DB
+	db mysqlDatabase
+}
+
+const DefaultMySQLDatabase = "rbacv2"
+
+// mysqlDatabase qualifies the package's SQL with a single, validated database
+// name. Keeping this at the database boundary makes it impossible for a query
+// added to the store to accidentally fall back to the historical rbacv2
+// database.
+type mysqlDatabase struct {
+	db     *sql.DB
+	prefix string
+}
+
+func newMySQLDatabase(db *sql.DB, database string) (mysqlDatabase, error) {
+	if db == nil {
+		return mysqlDatabase{}, errors.New("rbac: nil MySQL database")
+	}
+	if database == "" {
+		return mysqlDatabase{}, errors.New("rbac: MySQL database name is empty")
+	}
+	if strings.IndexByte(database, 0) >= 0 || len([]rune(database)) > 64 {
+		return mysqlDatabase{}, fmt.Errorf("rbac: invalid MySQL database name %q", database)
+	}
+	// A quoted identifier, including escaped backticks, prevents a configured
+	// database name from becoming executable SQL. MySQL permits database names
+	// with characters beyond [A-Za-z0-9_], so do not unnecessarily reject them.
+	return mysqlDatabase{
+		db:     db,
+		prefix: "`" + strings.ReplaceAll(database, "`", "``") + "`.",
+	}, nil
+}
+
+func (d mysqlDatabase) sql(query string) string {
+	return strings.ReplaceAll(query, DefaultMySQLDatabase+".", d.prefix)
+}
+
+func (d mysqlDatabase) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return d.db.ExecContext(ctx, d.sql(query), args...)
+}
+
+func (d mysqlDatabase) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return d.db.QueryContext(ctx, d.sql(query), args...)
+}
+
+func (d mysqlDatabase) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return d.db.QueryRowContext(ctx, d.sql(query), args...)
 }
 
 // NewMySQLStore creates the store and ensures the schema is in place.
 func NewMySQLStore(ctx context.Context, db *sql.DB) (*MySQLStore, error) {
-	s := &MySQLStore{db: db}
+	return NewMySQLStoreWithDatabase(ctx, db, DefaultMySQLDatabase)
+}
+
+// NewMySQLStoreWithDatabase creates a store whose tables live in database.
+// The caller must create the database and grant the configured MySQL user
+// access to it. NewMySQLStore remains available and uses rbacv2 for backwards
+// compatibility.
+func NewMySQLStoreWithDatabase(ctx context.Context, db *sql.DB, database string) (*MySQLStore, error) {
+	qualifiedDB, err := newMySQLDatabase(db, database)
+	if err != nil {
+		return nil, err
+	}
+	s := &MySQLStore{db: qualifiedDB}
 	if err := s.EnsureSchema(ctx); err != nil {
 		return nil, fmt.Errorf("mysql_store: ensure schema: %w", err)
 	}
@@ -44,7 +102,13 @@ func NewMySQLStore(ctx context.Context, db *sql.DB) (*MySQLStore, error) {
 
 // NewMySQLStoreManager wraps the store in a Manager and seeds the default role.
 func NewMySQLStoreManager(ctx context.Context, db *sql.DB) (*Manager, error) {
-	s, err := NewMySQLStore(ctx, db)
+	return NewMySQLStoreManagerWithDatabase(ctx, db, DefaultMySQLDatabase)
+}
+
+// NewMySQLStoreManagerWithDatabase is NewMySQLStoreWithDatabase plus the
+// default-role initialization performed by NewMySQLStoreManager.
+func NewMySQLStoreManagerWithDatabase(ctx context.Context, db *sql.DB, database string) (*Manager, error) {
+	s, err := NewMySQLStoreWithDatabase(ctx, db, database)
 	if err != nil {
 		return nil, err
 	}

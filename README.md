@@ -140,6 +140,22 @@ RBAC grants do not replace ownership, enrollment, publication, or privacy checks
 
 The existing core tables remain in their historical schema for compatibility. New applications that share a database should isolate RBAC objects at the database or schema level and decide whether the library's `users` table or application-owned user identifiers are authoritative before deployment.
 
+### MySQL database isolation
+
+The historical MySQL constructors use the `rbacv2` database. To keep one
+application's roles separate from other repositories on the same MySQL server,
+create a dedicated database and select it explicitly:
+
+```go
+// The MySQL account needs privileges on jpn_learning_rbac.
+mgr, err := rbac.NewMySQLStoreManagerWithDatabase(ctx, db, "jpn_learning_rbac")
+```
+
+`NewMySQLStoreWithDatabase` is available when a store rather than a manager is
+needed. The selected database is used for every table and foreign-key
+reference; it is not inferred from the connection DSN. The application remains
+responsible for creating the database and granting access before initialization.
+
 ## Testing
 
 * **Unit tests**:
